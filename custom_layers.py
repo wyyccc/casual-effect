@@ -2,6 +2,18 @@ import tensorflow as tf
 from tensorflow.keras.layers import Layer
 from tensorflow.keras.initializers import glorot_normal
 
+try:
+    from tensorflow.python.ops.init_ops_v2 import Zeros, Ones, glorot_normal
+except ImportError:
+    from tensorflow.python.ops.init_ops import Zeros, Ones, glorot_normal_initializer as glorot_normal
+
+from tensorflow.python.keras.layers import Layer, Dropout
+
+try:
+    from tensorflow.python.keras.layers import BatchNormalization
+except ImportError:
+    BatchNormalization = tf.keras.layers.BatchNormalization
+from tensorflow.python.keras.regularizers import l2
 
 class EpsilonLayer(Layer):
     def __init__(self):
@@ -48,12 +60,10 @@ class MMOELayer(Layer):
 
     def call(self, inputs, training=None, **kwargs):
         outputs = []
-        expert_out = tf.tensordot(inputs, self.expert_kernel, axes=(-1,0))
-        expert_out = tf.nn.relu(expert_out)
+        expert_out = tf.keras.layers.Dense(self.num_experts * self.output_dim, activation='relu')(inputs)
         expert_out = tf.reshape(expert_out, [-1, self.output_dim, self.num_experts])
         for i in range(self.num_tasks):
-            gate_out = tf.tensordot(inputs, self.gate_kernels[i], axes=(-1,0))
-            gate_out = tf.nn.softmax(gate_out)
+            gate_out = tf.keras.layers.Dense(self.num_experts, activation='softmax')(inputs)
             gate_out = tf.keras.layers.Dropout(self.gate_dropout, seed=self.seed)(gate_out, training=training)
             gate_out = tf.tile(tf.expand_dims(gate_out, axis=1), [1, self.output_dim, 1])
             output = tf.reduce_sum(tf.multiply(expert_out, gate_out), axis=2)
