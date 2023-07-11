@@ -47,6 +47,16 @@ def train_and_predict(x_train, t_train, yf_train,
     elif CFG.model_type == 'DeRCFR':
         model = make_DeRCFR(x_train.shape[1], rep_mode=CFG.rep_mode, pred_mode=CFG.pred_mode, output_mode=CFG.output_mode)
     
+    elif CFG.model_type == 'SCI':
+        model = make_SCI(x_train.shape[1], rep_mode=CFG.rep_mode, pred_mode=CFG.pred_mode, output_mode=CFG.output_mode)
+    
+    elif CFG.model_type == 'IPW':
+        PS_model, model = make_IPW(x_train.shape[1], rep_mode=CFG.rep_mode, pred_mode=CFG.pred_mode, output_mode=CFG.output_mode)
+        PS_model.compile(optimizer=tf.keras.optimizers.Nadam(learning_rate=CFG.lr), loss='bce')
+        PS_model.fit(x_train, t_train, validation_split=0.3, epochs=CFG.PS_batch_size, batch_size=CFG.batch_size, verbose=CFG.verbose)
+        for layer in PS_model.layers:
+            layer.trainable = False
+    
     model.compile(optimizer=tf.keras.optimizers.Nadam(learning_rate=CFG.lr), loss=CFG.loss)
     yt_train = np.concatenate([yf_train.reshape(-1, 1), t_train.reshape(-1, 1)], 1)
     model.fit(x_train, yt_train, callbacks=callbacks, validation_split=0.3, epochs=CFG.epoch, batch_size=CFG.batch_size, verbose=CFG.verbose)
@@ -54,16 +64,23 @@ def train_and_predict(x_train, t_train, yf_train,
     with tf.keras.utils.custom_object_scope({'EpsilonLayer': EpsilonLayer, 'MMOELayer': MMOELayer, 'TransformerEncoderLayer': TransformerEncoderLayer,
                                              'loss_regression': loss_regression, 'loss_cls': loss_cls, 'loss_treg': loss_treg, 'loss_bcauss': loss_bcauss,
                                              'loss_trans_reg': loss_trans_reg, 'loss_trans_cls': loss_trans_cls, 'loss_trans_bcauss': loss_trans_bcauss,
-                                             'loss_DeRCFR_cls': loss_DeRCFR_cls, 'loss_DeRCFR_bcauss': loss_DeRCFR_bcauss}):
+                                             'loss_DeRCFR_cls': loss_DeRCFR_cls, 'loss_DeRCFR_bcauss': loss_DeRCFR_bcauss, 'loss_SCI': loss_SCI,
+                                             'loss_IPW': loss_IPW, 'loss_IPW_trans': loss_IPW_trans,}):
         best_model = tf.keras.models.load_model(filepath=CFG.model_type+'_'+CFG.rep_mode+'_'+CFG.pred_mode+'_'+CFG.output_mode+'.h5')
     
-    if CFG.model_type in ['dragonnet', 'DeRCFR']:
+    if CFG.model_type in ['dragonnet', 'DeRCFR', 'IPW']:
         yt_hat_test = best_model.predict(x_test)
+        y0_pred = yt_hat_test[:, 0]
+        y1_pred = yt_hat_test[:, 1]
+    elif CFG.model_type in ['SCI']:
+        yt_hat_test = best_model.predict(x_test)
+        y0_pred = yt_hat_test[:, 2]
+        y1_pred = yt_hat_test[:, 3]
 
-    ite_mse, ate = get_metrics(t_test, yf_test, ycf_test, yt_hat_test[:, 0], yt_hat_test[:, 1])
-    auuc = calculate_auuc(yt_hat_test[:, 1]-yt_hat_test[:, 0], t_test, yf_test)
+    ite_mse, ate = get_metrics(t_test, yf_test, ycf_test, y0_pred, y1_pred)
+    # auuc = calculate_auuc(yt_hat_test[:, 1]-yt_hat_test[:, 0], t_test, yf_test)
 
-    return [ite_mse, ate], auuc
+    return [ite_mse, ate]
 
 
 def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/ce/data/ihdp'):
@@ -92,12 +109,12 @@ def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/ce/data/ihdp'):
         X_train, T_train, YF_train, YCF_train = X_tr[:, :, idx], T_tr[:, idx], YF_tr[:, idx], YCF_tr[:, idx]
         X_test, T_test, YF_test, YCF_test = X_te[:, :, idx], T_te[:, idx], YF_te[:, idx], YCF_te[:, idx]
         start = time.time()
-        metrics, auuc = (train_and_predict(X_train, T_train, YF_train,
+        metrics = (train_and_predict(X_train, T_train, YF_train,
                           X_test, T_test, YF_test, YCF_test,
                           CFG))
         ite_mse.append(metrics[0])
         ate.append(metrics[1])
-        AUUC.append(auuc)
+        # AUUC.append(auuc)
         end = time.time()
         print('elaps: %.4f'%(end-start))
     print('ite mse: ', np.mean(ite_mse), np.std(ite_mse))
@@ -109,16 +126,17 @@ def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/ce/data/ihdp'):
 
 class CFG:
     lr=1e-3
-    epoch=300
+    epoch=500
+    PS_batch_size=80
     batch_size=1024
     verbose=0
 
     cv=100
-    model_type='dragonnet'        # dragonnet / DeRCFR
-    rep_mode='MLP'           # MLP / transformer
-    pred_mode='MLP'               # MLP / MMOE
-    output_mode='bcauss'             # regression / cls / treg / bcauss / transformer_regression / transformer_cls / transformer_bcauss
-    loss=loss_bcauss        # loss_regression / loss_cls / loss_treg / loss_bcauss / loss_trans_reg / loss_trans_cls / loss_trans_bcauss / loss_DeRCFR_cls / loss_DeRCFR_bcauss
+    model_type='IPW'        # dragonnet / DeRCFR / SCI / IPW
+    rep_mode='transformer'           # MLP / transformer
+    pred_mode='MLP'               # MLP / PLE
+    output_mode='IPW_transformer'            # regression / cls / treg / bcauss / transformer_regression / transformer_cls / transformer_bcauss
+    loss=loss_IPW_trans      # loss_regression / loss_cls / loss_treg / loss_bcauss / loss_trans_reg / loss_trans_cls / loss_trans_bcauss / loss_DeRCFR_cls / loss_DeRCFR_bcauss / loss_IPW / loss_IPW_trans
 
 
 if __name__ == '__main__':
