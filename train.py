@@ -17,10 +17,12 @@ def get_metrics(t, y_f, y_cf, y0, y1):
     eff_true = y1_true - y0_true
     eff_pred = y1 - y0
     eff_diff = eff_true - eff_pred
+    y_pred = (1-t)*y0 + t*y1
 
     ite_mse = tf.reduce_sum(tf.square(eff_diff)).numpy() / sample_num
     ate = tf.abs(tf.reduce_sum(eff_diff)).numpy() / sample_num
-    return ite_mse, ate
+    mse = tf.reduce_sum(tf.square(y_f - y_pred)).numpy() / sample_num
+    return ite_mse, ate, mse
 
 
 def calculate_auuc(uplift, treatment, outcome):
@@ -40,9 +42,9 @@ def train_and_predict(x_train, t_train, yf_train,
     tf.random.set_seed(123)
     np.random.seed(123)
 
-    callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath=CFG.model_type+'_'+CFG.rep_mode+'_'+CFG.pred_mode+'_'+CFG.output_mode+'.h5', monitor='val_loss', save_best_only=True, save_weights_only=False, mode='min', verbose=CFG.verbose)]
-    if CFG.model_type == 'dragonnet':
-        model = make_dragonnet(x_train.shape[1], rep_mode=CFG.rep_mode, pred_mode=CFG.pred_mode, output_mode=CFG.output_mode)
+    callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath='model/'+CFG.model_type+'_'+CFG.rep_mode+'_'+CFG.pred_mode+'_'+CFG.output_mode+'.h5', monitor='val_loss', save_best_only=True, save_weights_only=False, mode='min', verbose=CFG.verbose)]
+    if CFG.model_type == 'Dragonnet':
+        model = make_Dragonnet(x_train.shape[1], rep_mode=CFG.rep_mode, pred_mode=CFG.pred_mode, output_mode=CFG.output_mode)
     
     elif CFG.model_type == 'DeRCFR':
         model = make_DeRCFR(x_train.shape[1], rep_mode=CFG.rep_mode, pred_mode=CFG.pred_mode, output_mode=CFG.output_mode)
@@ -50,8 +52,8 @@ def train_and_predict(x_train, t_train, yf_train,
     elif CFG.model_type == 'SCI':
         model = make_SCI(x_train.shape[1], rep_mode=CFG.rep_mode, pred_mode=CFG.pred_mode, output_mode=CFG.output_mode)
     
-    elif CFG.model_type == 'IPW':
-        PS_model, model = make_IPW(x_train.shape[1], rep_mode=CFG.rep_mode, pred_mode=CFG.pred_mode, output_mode=CFG.output_mode)
+    elif CFG.model_type == 'BWCFR':
+        PS_model, model = make_BWCFR(x_train.shape[1], rep_mode=CFG.rep_mode, pred_mode=CFG.pred_mode, output_mode=CFG.output_mode)
         PS_model.compile(optimizer=tf.keras.optimizers.Nadam(learning_rate=CFG.lr), loss='bce')
         PS_model.fit(x_train, t_train, validation_split=0.3, epochs=CFG.PS_batch_size, batch_size=CFG.batch_size, verbose=CFG.verbose)
         for layer in PS_model.layers:
@@ -66,9 +68,9 @@ def train_and_predict(x_train, t_train, yf_train,
                                              'loss_trans_reg': loss_trans_reg, 'loss_trans_cls': loss_trans_cls, 'loss_trans_bcauss': loss_trans_bcauss,
                                              'loss_DeRCFR_cls': loss_DeRCFR_cls, 'loss_DeRCFR_bcauss': loss_DeRCFR_bcauss, 'loss_SCI': loss_SCI,
                                              'loss_IPW': loss_IPW, 'loss_IPW_trans': loss_IPW_trans,}):
-        best_model = tf.keras.models.load_model(filepath=CFG.model_type+'_'+CFG.rep_mode+'_'+CFG.pred_mode+'_'+CFG.output_mode+'.h5')
+        best_model = tf.keras.models.load_model(filepath='model/'+CFG.model_type+'_'+CFG.rep_mode+'_'+CFG.pred_mode+'_'+CFG.output_mode+'.h5')
     
-    if CFG.model_type in ['dragonnet', 'DeRCFR', 'IPW']:
+    if CFG.model_type in ['Dragonnet', 'DeRCFR', 'BWCFR']:
         yt_hat_test = best_model.predict(x_test)
         y0_pred = yt_hat_test[:, 0]
         y1_pred = yt_hat_test[:, 1]
@@ -77,10 +79,10 @@ def train_and_predict(x_train, t_train, yf_train,
         y0_pred = yt_hat_test[:, 2]
         y1_pred = yt_hat_test[:, 3]
 
-    ite_mse, ate = get_metrics(t_test, yf_test, ycf_test, y0_pred, y1_pred)
+    ite_mse, ate, mse = get_metrics(t_test, yf_test, ycf_test, y0_pred, y1_pred)
     # auuc = calculate_auuc(yt_hat_test[:, 1]-yt_hat_test[:, 0], t_test, yf_test)
 
-    return [ite_mse, ate]
+    return [ite_mse, ate, mse]
 
 
 def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/ce/data/ihdp'):
@@ -101,7 +103,7 @@ def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/ce/data/ihdp'):
     mu_0_te = test.f.mu0.copy()
     mu_1_te = test.f.mu1.copy()
 
-    ite_mse, ate, AUUC = [], [], []
+    ite_mse, ate, mse, AUUC = [], [], [], []
     for idx in range(X_tr.shape[-1]):
         if idx == CFG.cv:
             break
@@ -114,11 +116,13 @@ def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/ce/data/ihdp'):
                           CFG))
         ite_mse.append(metrics[0])
         ate.append(metrics[1])
+        mse.append(metrics[2])
         # AUUC.append(auuc)
         end = time.time()
         print('elaps: %.4f'%(end-start))
     print('ite mse: ', np.mean(ite_mse), np.std(ite_mse))
     print('ate: ', np.mean(ate), np.std(ate))
+    print('mse: ', np.mean(mse), np.std(mse))
     # print('AUUC: ', np.mean(AUUC), np.std(AUUC))
     # print(ite_mse)
     # print(ate)
@@ -132,11 +136,11 @@ class CFG:
     verbose=0
 
     cv=100
-    model_type='IPW'        # dragonnet / DeRCFR / SCI / IPW
+    model_type='DeRCFR'        # Dragonnet / DeRCFR / SCI / BWCFR
     rep_mode='transformer'           # MLP / transformer
     pred_mode='MLP'               # MLP / PLE
-    output_mode='IPW_transformer'            # regression / cls / treg / bcauss / transformer_regression / transformer_cls / transformer_bcauss
-    loss=loss_IPW_trans      # loss_regression / loss_cls / loss_treg / loss_bcauss / loss_trans_reg / loss_trans_cls / loss_trans_bcauss / loss_DeRCFR_cls / loss_DeRCFR_bcauss / loss_IPW / loss_IPW_trans
+    output_mode='transformer_cls'            # regression / cls / treg / bcauss / transformer_regression / transformer_cls / transformer_bcauss /
+    loss=loss_trans_cls    # loss_regression / loss_cls / loss_treg / loss_bcauss / loss_trans_reg / loss_trans_cls / loss_trans_bcauss / loss_DeRCFR_cls / loss_DeRCFR_bcauss / loss_IPW / loss_IPW_trans
 
 
 if __name__ == '__main__':

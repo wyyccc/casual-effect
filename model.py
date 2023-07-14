@@ -191,7 +191,7 @@ def loss_DeRCFR_bcauss(label, concat_pred, hidden_dim=100):
     return loss_reg + loss_bce + loss_bcauss
 
 
-def loss_SCI(label, concat_pred, ratio_recon=1, ratio_depen=0): 
+def loss_SCI(label, concat_pred, ratio_recon=0, ratio_depen=0): 
     hidden_dim = (concat_pred.shape[1]-6) // 2
     y_true, t_true = label[:, 0:1], label[:, 1:2]
     y0_pred, y1_pred, y0_predictions, y1_predictions, recon_loss0, recon_loss1, x0, x1 = concat_pred[:, 0:1], concat_pred[:, 1:2], concat_pred[:, 2:3], concat_pred[:, 3:4], concat_pred[:, 4:5], concat_pred[:, 5:6], concat_pred[:, 6:6+hidden_dim], concat_pred[:, 6+hidden_dim:]
@@ -207,19 +207,19 @@ def loss_SCI(label, concat_pred, ratio_recon=1, ratio_depen=0):
     return loss_reg + ratio_recon * loss_recon + ratio_depen * loss_depen
 
 
-def loss_IPW(label, concat_pred):
+def loss_IPW(label, concat_pred, threshold=1):
     y_true, t_true = label[:, 0:1], label[:, 1:2]
     y0_predictions, y1_predictions, t_predictions = concat_pred[:, 0:1], concat_pred[:, 1:2], concat_pred[:, 2:3]
     t_pred = (t_predictions + 0.001) / 1.002
 
-    loss0 = tf.reduce_sum((1. - t_true) * tf.square(y_true - y0_predictions) * 1/(1-t_pred))
-    loss1 = tf.reduce_sum(t_true * tf.square(y_true - y1_predictions) / t_pred)
+    loss0 = tf.reduce_sum((1. - t_true) * tf.square(y_true - y0_predictions) * tf.cast(1-t_pred<threshold, tf.float32)/(1-t_pred))
+    loss1 = tf.reduce_sum(t_true * tf.square(y_true - y1_predictions) * tf.cast(t_pred<threshold, tf.float32) / t_pred)
     loss_reg = loss0 + loss1
 
     return loss_reg
 
 
-def loss_IPW_trans(label, concat_pred, ratio_recon=1):
+def loss_IPW_trans(label, concat_pred, ratio_recon=0):
     y_true, t_true = label[:, 0:1], label[:, 1:2]
     y0_predictions, y1_predictions, t_predictions, recon_term = concat_pred[:, 0:1], concat_pred[:, 1:2], concat_pred[:, 2:3], concat_pred[:, 3:4]
     t_pred = (t_predictions + 0.001) / 1.002
@@ -233,7 +233,7 @@ def loss_IPW_trans(label, concat_pred, ratio_recon=1):
     return loss_reg + ratio_recon * loss_recon
 
 
-def make_dragonnet(input_dim,
+def make_Dragonnet(input_dim,
                    num_domains=2,
                    reg_l2=0.001,
                    act_fn='relu',
@@ -382,7 +382,9 @@ def make_DeRCFR(input_dim,
             c_predictions = Dense(units=1, activation='sigmoid')(C)
     
     ## output
-    if output_mode == 'cls':
+    if output_mode == 'regression':
+        model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions]))
+    elif output_mode == 'cls':
         model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions, t_predictions, A, I]))
     elif output_mode == 'bcauss':
         model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions, t_predictions, A, I, c_predictions, inputs]))
@@ -452,7 +454,7 @@ def make_SCI(input_dim,
     return model
 
 
-def make_IPW(input_dim,
+def make_BWCFR(input_dim,
              num_domains=2,
              hidden_dim=100,
              reg_l2=0.001,
@@ -480,9 +482,9 @@ def make_IPW(input_dim,
         diff = tf.square(inputs - recon_inputs)
         sum_recon_diff = tf.reduce_sum(diff, axis=1, keepdims=True)
     
-    x = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal')(inputs)
-    x = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal')(x)
-    t_pred = Dense(units=1, activation='sigmoid', kernel_initializer='RandomNormal')(x)
+    x_PS = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal')(inputs)
+    x_PS = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal')(x_PS)
+    t_pred = Dense(units=1, activation='sigmoid', kernel_initializer='RandomNormal')(x_PS)
     PS_model = Model(inputs=inputs, outputs=t_pred)
 
 
@@ -498,9 +500,9 @@ def make_IPW(input_dim,
         1
     
     ## output
-    if output_mode == 'IPW':
+    if output_mode == 'cls':
         model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions, t_pred]))
-    elif output_mode == 'IPW_transformer':
+    elif output_mode == 'transformer_cls':
         model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions, t_pred, sum_recon_diff]))
     # elif output_mode == 'bcauss':
     #     model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions, t_predictions, A, I, c_predictions, inputs]))
