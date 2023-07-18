@@ -36,7 +36,7 @@ def calculate_auuc(uplift, treatment, outcome):
     return auuc.numpy()
 
 
-def train_and_predict(x_train, t_train, yf_train,
+def train_and_predict(x_train, t_train, yf_train, ycf_train,
                       x_test, t_test, yf_test, ycf_test,
                       CFG,):
     tf.random.set_seed(123)
@@ -60,6 +60,8 @@ def train_and_predict(x_train, t_train, yf_train,
             layer.trainable = False
     
     model.compile(optimizer=tf.keras.optimizers.Nadam(learning_rate=CFG.lr), loss=CFG.loss)
+    # print(model.summary())
+
     yt_train = np.concatenate([yf_train.reshape(-1, 1), t_train.reshape(-1, 1)], 1)
     model.fit(x_train, yt_train, callbacks=callbacks, validation_split=0.3, epochs=CFG.epoch, batch_size=CFG.batch_size, verbose=CFG.verbose)
 
@@ -74,6 +76,12 @@ def train_and_predict(x_train, t_train, yf_train,
         yt_hat_test = best_model.predict(x_test)
         y0_pred = yt_hat_test[:, 0]
         y1_pred = yt_hat_test[:, 1]
+        if CFG.insample:
+            yt_hat_train = best_model.predict(x_train)
+            y0_pred_train = yt_hat_train[:, 0]
+            y1_pred_train = yt_hat_train[:, 1]
+            ite_mse_insample, ate_insample, mse_insample = get_metrics(t_train, yf_train, ycf_train, y0_pred_train, y1_pred_train)
+
     elif CFG.model_type in ['SCI']:
         yt_hat_test = best_model.predict(x_test)
         y0_pred = yt_hat_test[:, 2]
@@ -82,6 +90,8 @@ def train_and_predict(x_train, t_train, yf_train,
     ite_mse, ate, mse = get_metrics(t_test, yf_test, ycf_test, y0_pred, y1_pred)
     # auuc = calculate_auuc(yt_hat_test[:, 1]-yt_hat_test[:, 0], t_test, yf_test)
 
+    if CFG.insample:
+        return [ite_mse, ate, mse], [ite_mse_insample, ate_insample, mse_insample]
     return [ite_mse, ate, mse]
 
 
@@ -104,6 +114,7 @@ def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/ce/data/ihdp'):
     mu_1_te = test.f.mu1.copy()
 
     ite_mse, ate, mse, AUUC = [], [], [], []
+    ite_mse_insample, ate_insample, mse_insample, AUUC_insample = [], [], [], []
     for idx in range(X_tr.shape[-1]):
         if idx == CFG.cv:
             break
@@ -111,18 +122,32 @@ def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/ce/data/ihdp'):
         X_train, T_train, YF_train, YCF_train = X_tr[:, :, idx], T_tr[:, idx], YF_tr[:, idx], YCF_tr[:, idx]
         X_test, T_test, YF_test, YCF_test = X_te[:, :, idx], T_te[:, idx], YF_te[:, idx], YCF_te[:, idx]
         start = time.time()
-        metrics = (train_and_predict(X_train, T_train, YF_train,
+        if CFG.insample:
+            metrics, metrics_insample = (train_and_predict(X_train, T_train, YF_train, YCF_train,
                           X_test, T_test, YF_test, YCF_test,
                           CFG))
-        ite_mse.append(metrics[0])
-        ate.append(metrics[1])
-        mse.append(metrics[2])
+            ite_mse.append(metrics[0])
+            ate.append(metrics[1])
+            mse.append(metrics[2])
+            ite_mse_insample.append(metrics_insample[0])
+            ate_insample.append(metrics_insample[1])
+            mse_insample.append(metrics_insample[2])
+        else:
+            metrics = (train_and_predict(X_train, T_train, YF_train, YCF_train,
+                          X_test, T_test, YF_test, YCF_test,
+                          CFG))
+            ite_mse.append(metrics[0])
+            ate.append(metrics[1])
+            mse.append(metrics[2])
         # AUUC.append(auuc)
         end = time.time()
         print('elaps: %.4f'%(end-start))
     print('ite mse: ', np.mean(ite_mse), np.std(ite_mse))
     print('ate: ', np.mean(ate), np.std(ate))
     print('mse: ', np.mean(mse), np.std(mse))
+    print('ite mse (insample): ', np.mean(ite_mse_insample), np.std(ite_mse_insample))
+    print('ate (insample): ', np.mean(ate_insample), np.std(ate_insample))
+    print('mse (insample): ', np.mean(mse_insample), np.std(mse_insample))
     # print('AUUC: ', np.mean(AUUC), np.std(AUUC))
     # print(ite_mse)
     # print(ate)
@@ -135,12 +160,13 @@ class CFG:
     batch_size=1024
     verbose=0
 
-    cv=100
-    model_type='DeRCFR'        # Dragonnet / DeRCFR / SCI / BWCFR
-    rep_mode='transformer'           # MLP / transformer
-    pred_mode='MLP'               # MLP / PLE
-    output_mode='transformer_cls'            # regression / cls / treg / bcauss / transformer_regression / transformer_cls / transformer_bcauss /
-    loss=loss_trans_cls    # loss_regression / loss_cls / loss_treg / loss_bcauss / loss_trans_reg / loss_trans_cls / loss_trans_bcauss / loss_DeRCFR_cls / loss_DeRCFR_bcauss / loss_IPW / loss_IPW_trans
+    cv=1000
+    insample=True
+    model_type='Dragonnet'        # Dragonnet / DeRCFR / SCI / BWCFR
+    rep_mode='MLP'           # MLP / transformer
+    pred_mode='PLE'               # MLP / PLE
+    output_mode='regression'            # regression / cls / treg / bcauss / transformer_regression / transformer_cls / transformer_bcauss /
+    loss=loss_regression    # loss_regression / loss_cls / loss_treg / loss_bcauss / loss_trans_reg / loss_trans_cls / loss_trans_bcauss / loss_DeRCFR_cls / loss_DeRCFR_bcauss / loss_IPW / loss_IPW_trans
 
 
 if __name__ == '__main__':
