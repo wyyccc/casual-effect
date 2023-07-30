@@ -9,6 +9,56 @@ import tensorflow_probability as tfp
 from custom_layers import *
 
 
+def linear_kernel(source, target):
+    return tf.matmul(source, tf.transpose(target))
+
+
+def polynomial_kernel(source, target, degree=2, coef0=1.0):
+    return tf.pow((tf.matmul(source, tf.transpose(target)) + coef0), degree)
+
+
+def sigmoid_kernel(source, target, coef0=1.0):
+    return tf.tanh((tf.matmul(source, tf.transpose(target)) + coef0))
+
+
+def guassian_kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
+    n_s = tf.shape(source)[0]
+    n_t = tf.shape(target)[0]
+    n_samples = n_s + n_t
+    total = tf.concat([source, target], axis=0)
+    total0 = tf.expand_dims(total,axis=0)
+    total1 = tf.expand_dims(total,axis=1)
+    L2_distance = tf.reduce_sum(((total0 - total1) ** 2),axis=2)
+    if fix_sigma:
+        bandwidth = fix_sigma
+    else:
+        bandwidth = tf.reduce_sum(L2_distance) / tf.cast(n_samples ** 2 - n_samples, tf.float32)
+    bandwidth /= kernel_mul ** (kernel_num // 2)
+    bandwidth_list = [bandwidth * (kernel_mul ** i) for i in range(kernel_num)]
+    kernel_val = [tf.exp(-L2_distance / bandwidth_temp) for bandwidth_temp in bandwidth_list]
+    return sum(kernel_val)
+
+
+def MMD(source, target, kernels_func=guassian_kernel):    # linear_kernel / polynomial_kernel / sigmoid_kernel / guassian_kernel
+    kernels = kernels_func(source, target)
+    n_s = tf.shape(source)[0]
+    n_t = tf.shape(target)[0]
+    XX = tf.reduce_sum(kernels[:n_s, :n_s])/(tf.cast(n_s, tf.float32)**2)
+    YY = tf.reduce_sum(kernels[-n_t:, -n_t:])/(tf.cast(n_t, tf.float32)**2)
+    XY = tf.reduce_sum(kernels[:n_s, -n_t:])/(tf.cast(n_s, tf.float32)*tf.cast(n_t, tf.float32))
+    YX = tf.reduce_sum(kernels[-n_t:, :n_s])/(tf.cast(n_s, tf.float32)*tf.cast(n_t, tf.float32))
+    loss = XX + YY - XY - YX
+    return tf.abs(loss)
+
+
+class MMDLayer(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super(MMDLayer, self).__init__(**kwargs)
+
+    def call(self, source, target):
+        return MMD(source, target)
+
+
 def cal_corr(x, y):
     mean1, mean2 = tf.reduce_mean(x), tf.reduce_mean(y)
     deviation1, deviation2 = tf.subtract(x, mean1), tf.subtract(y, mean2)
@@ -34,29 +84,6 @@ def HSIC(x, y):
     hsic = tf.linalg.trace(tf.matmul(tf.matmul(tf.matmul(H, K), H), Q))
     scale = tf.cast(1/((n-1)*(n-1)), dtype=tf.float32)
     return scale * hsic
-
-
-def guassian_kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
-    n_s=tf.shape(source)[0]
-    n_s=64 if n_s is None else n_s
-    n_t= tf.shape(target)[0]
-    n_t=64 if n_t is None else n_t
-    n_samples =n_s+n_t
-    total = tf.concat([source, target], axis=0)
-    total0 = tf.expand_dims(total,axis=0)
-    total1 = tf.expand_dims(total,axis=1)
-    L2_distance = tf.reduce_sum(((total0 - total1) ** 2),axis=2)
-    if fix_sigma:
-        bandwidth = fix_sigma
-    else:
-        bandwidth = tf.reduce_sum(L2_distance) / float(n_samples ** 2 - n_samples)
-    bandwidth /= kernel_mul ** (kernel_num // 2)
-    bandwidth_list = [bandwidth * (kernel_mul ** i) for i in range(kernel_num)]
-    kernel_val = [tf.exp(-L2_distance / bandwidth_temp) for bandwidth_temp in bandwidth_list]
-    return sum(kernel_val)
-
-
-def MMD(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
     kernels = guassian_kernel(source, target,
                               kernel_mul=kernel_mul, kernel_num=kernel_num, fix_sigma=fix_sigma)
     n_s=tf.shape(source)[0]
@@ -268,7 +295,7 @@ def loss_IPW_trans(label, concat_pred, ratio_recon=0):
     return loss_reg + ratio_recon * loss_recon
 
 
-def loss_memento(label, concat_pred, ratio_bce=1.0, ratio_mmd=1.0):
+def loss_memento(label, concat_pred, ratio_bce=1.0, ratio_mmd=0.0):
     y_true, t_true = label[:, 0:1], label[:, 1:2]
     y0_predictions, y1_predictions, t_predictions, x = concat_pred[:, 0:1], concat_pred[:, 1:2], concat_pred[:, 2:3], concat_pred[:, 3:]
     t_pred = (t_predictions + 0.001) / 1.002
@@ -611,20 +638,23 @@ def make_TransTEE(input_dim,
 def make_Memento(input_dim,
                 reg_l2=0.001,
                 act_fn='relu',
-                output_mode='regression',
+                ratio_BCE=0.0,
+                ratio_MMD=0.0,
                 ):
     
-    inputs = Input(shape=(input_dim,), name='inputs')
+    inputs = Input(shape=(input_dim+2,), name='input')
+    input_x, input_t, input_y = inputs[:, :input_dim], inputs[:, input_dim:input_dim+1], inputs[:, input_dim+1:]
+    t = tf.cast(input_t, tf.float32)
 
     ## x representation
-    x = Dense(units=25, activation=act_fn, kernel_initializer='RandomNormal')(inputs)
+    x = Dense(units=25, activation=act_fn, kernel_initializer='RandomNormal')(input_x)
     x = Dense(units=25, activation=act_fn, kernel_initializer='RandomNormal')(x)
     x = Dense(units=25, activation=act_fn, kernel_initializer='RandomNormal')(x)
-    t_predictions = Dense(units=1, activation='sigmoid')(x)
+    t_pred = Dense(units=1, activation='sigmoid')(x)
 
 
     ## predict layers
-    x = Dense(units=100, activation=act_fn, kernel_initializer='RandomNormal')(inputs)
+    x = Dense(units=100, activation=act_fn, kernel_initializer='RandomNormal')(input_x)
     x = Dense(units=100, activation=act_fn, kernel_initializer='RandomNormal')(x)
     x = Dense(units=100, activation=act_fn, kernel_initializer='RandomNormal')(x)
 
@@ -636,10 +666,22 @@ def make_Memento(input_dim,
     y1_predictions = Dense(units=1, activation=None, kernel_regularizer=regularizers.l2(reg_l2), name='y1_predictions')(y1_hidden)
 
     ## output
-    if output_mode == 'regression':
-        model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions]))
-    elif output_mode == 'memento':
-        model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions, t_predictions, x]))
+    model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions]))
+    y_pred = tf.multiply(y0_predictions, 1-t) + tf.multiply(y1_predictions, t)
+    model = Model(inputs=inputs, outputs=y_pred)
+
+    ## loss
+    # weight = tf.stop_gradient(tf.multiply(t, 1/(t_pred+0.001) + tf.multiply(1-t, 1/(1-t_pred+0.001))))
+    # loss = tf.reduce_mean(tf.multiply(tf.square(input_y - y_pred), weight))
+    loss = tf.reduce_mean(tf.square(input_y - y_pred))
+
+    loss += ratio_BCE * tf.reduce_mean(tf.keras.losses.binary_crossentropy(t, t_pred))
+
+    index_0, index_1 = tf.where(tf.equal(t, 0)), tf.where(tf.equal(t, 1))
+    x0, x1 = tf.gather(x, index_0), tf.gather(x, index_1)
+    loss += ratio_MMD * MMD(x0, x1)
+
+    model.add_loss(loss)
     
     return model
 

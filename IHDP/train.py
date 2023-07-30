@@ -61,13 +61,22 @@ def train_and_predict(x_train, t_train, yf_train, ycf_train,
     elif CFG.model_type == 'TransTEE':
         model = make_TransTEE(x_train.shape[1], output_mode=CFG.output_mode)
     elif CFG.model_type == 'Memento':
-        model = make_Memento(x_train.shape[1], output_mode=CFG.output_mode)
+        model = make_Memento(x_train.shape[1])
     
-    model.compile(optimizer=tf.keras.optimizers.Nadam(learning_rate=CFG.lr), loss=CFG.loss)
+    if CFG.model_type == 'Memento':
+        model.compile(optimizer=tf.keras.optimizers.Nadam(learning_rate=CFG.lr))
+    else:
+        model.compile(optimizer=tf.keras.optimizers.Nadam(learning_rate=CFG.lr), loss=CFG.loss)
     # model.summary()
 
-    yt_train = np.concatenate([yf_train.reshape(-1, 1), t_train.reshape(-1, 1)], 1)
-    model.fit(x_train, yt_train, callbacks=callbacks, validation_split=0.3, epochs=CFG.epoch, batch_size=CFG.batch_size, verbose=CFG.verbose)
+    if CFG.model_type == 'Memento':
+        xyt_train = np.concatenate([x_train, yf_train.reshape(-1, 1), t_train.reshape(-1, 1)], 1)
+        # print(model.predict(xyt_train))
+        # assert 1==2
+        model.fit(xyt_train, yf_train, callbacks=callbacks, validation_split=0.3, epochs=CFG.epoch, batch_size=CFG.batch_size, verbose=CFG.verbose)
+    else:
+        yt_train = np.concatenate([yf_train.reshape(-1, 1), t_train.reshape(-1, 1)], 1)
+        model.fit(x_train, yt_train, callbacks=callbacks, validation_split=0.3, epochs=CFG.epoch, batch_size=CFG.batch_size, verbose=CFG.verbose)
 
     with tf.keras.utils.custom_object_scope({'EpsilonLayer': EpsilonLayer, 'MMOELayer': MMOELayer, 'TransformerEncoderLayer': TransformerEncoderLayer,
                                              'loss_regression': loss_regression, 'loss_cls': loss_cls, 'loss_treg': loss_treg, 'loss_bcauss': loss_bcauss,
@@ -99,7 +108,7 @@ def train_and_predict(x_train, t_train, yf_train, ycf_train,
     return [ite_mse, ate, mse]
 
 
-def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/ce/data/ihdp'):
+def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/IHDP/data/ihdp'):
     train_cv = np.load(os.path.join(data_base_dir,'ihdp_npci_1-1000.train.npz'))
     test = np.load(os.path.join(data_base_dir,'ihdp_npci_1-1000.test.npz'))
     
@@ -157,12 +166,12 @@ def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/ce/data/ihdp'):
 
 class CFG:
     lr=1e-3
-    epoch=300
+    epoch=10
     PS_batch_size=80
     batch_size=1024
-    verbose=0
+    verbose=1
 
-    cv=10
+    cv=1
     seed=0
     insample=True
     model_type='Memento'        # Dragonnet / DeRCFR / SCI / BWCFR / TransTEE / Memento
