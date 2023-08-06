@@ -10,6 +10,8 @@ from sklearn.metrics import accuracy_score
 import random
 from tensorflow.keras.callbacks import LambdaCallback
 
+# import logging
+# logger = logging.getLogger()
 
 import warnings
 warnings.filterwarnings("ignore")
@@ -47,9 +49,19 @@ def train_and_predict(x_train, t_train, y_train,
     callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath='model/'+CFG.model_name+'.h5', monitor='val_loss', save_best_only=True, save_weights_only=False, mode='min', verbose=CFG.verbose)]
     
     if CFG.model_type == 'Tarnet':
-        model = make_Tarnet(x_train.shape[1], use_IPW=CFG.use_IPW, use_MMD=CFG.use_MMD, use_Wdist=CFG.use_Wdist, use_BCAUSS=CFG.use_BCAUSS, ratio_ce=CFG.ratio_ce, ratio_mmd=CFG.ratio_MMD, ratio_Wdist=CFG.ratio_Wdist, ratio_bcauss=CFG.ratio_BCAUSS)
+        model = make_Tarnet(x_train.shape[1], use_IPW=CFG.use_IPW, use_MMD=CFG.use_MMD, use_Wdist=CFG.use_Wdist, use_HSIC=CFG.use_HSIC
+                            , ratio_ce=CFG.ratio_ce, ratio_mmd=CFG.ratio_MMD, ratio_Wdist=CFG.ratio_Wdist, ratio_HSIC=CFG.ratio_HSIC)
     elif CFG.model_type == 'DRCFR':
-        model = make_DRCFR(x_train.shape[1], use_IPW=CFG.use_IPW, use_MIM=CFG.use_MIM, use_MMD=CFG.use_MMD, use_Wdist=CFG.use_Wdist, use_BCAUSS=CFG.use_BCAUSS, ratio_ce=CFG.ratio_ce, ratio_MIM=CFG.ratio_MIM, ratio_mmd=CFG.ratio_MMD, ratio_Wdist=CFG.ratio_Wdist, ratio_bcauss=CFG.ratio_BCAUSS)
+        model = make_DRCFR(x_train.shape[1], use_IPW=CFG.use_IPW, use_DR=CFG.use_DR, use_MMD=CFG.use_MMD, use_Wdist=CFG.use_Wdist, use_HSIC=CFG.use_HSIC, use_infomax=CFG.use_infomax
+                           , ratio_ce=CFG.ratio_ce, ratio_DR=CFG.ratio_DR, ratio_mmd=CFG.ratio_MMD, ratio_Wdist=CFG.ratio_Wdist, ratio_HSIC=CFG.ratio_HSIC, ratio_infomax=CFG.ratio_infomax
+                           , loss_verbose=CFG.loss_verbose)
+    elif CFG.model_type == 'IIB':
+        model = make_IIB(x_train.shape[1], use_MI=CFG.use_MI, use_DR=CFG.use_DR, ratio_MI=CFG.ratio_MI, ratio_DR=CFG.ratio_DR
+                         , loss_verbose=CFG.loss_verbose)
+
+    elif CFG.model_type == 'IDRL':
+        model = make_IDRL(x_train.shape[1], use_MI=CFG.use_MI, use_DR=CFG.use_DR, use_PS=CFG.use_PS, ratio_MI=CFG.ratio_MI, ratio_DR=CFG.ratio_DR, ratio_PS=CFG.ratio_PS
+                         , loss_verbose=CFG.loss_verbose)
 
     model.compile(optimizer=tf.keras.optimizers.Nadam(learning_rate=CFG.lr))
     # model.summary()
@@ -60,10 +72,11 @@ def train_and_predict(x_train, t_train, y_train,
     #print(model.predict(xty_train[:10]))
     #assert 1==2
     model.fit(xty_train, y_train, callbacks=callbacks, validation_split=0.3, epochs=CFG.epoch, batch_size=CFG.batch_size, verbose=CFG.verbose)
+    #assert 1==2
     #print(model.predict(xty_train[:10]))
 
     with tf.keras.utils.custom_object_scope({'EpsilonLayer': EpsilonLayer, 'MMOELayer': MMOELayer, 'TransformerEncoderLayer': TransformerEncoderLayer,
-                                             'MMDLayer': MMDLayer,}):
+                                             'MMDLayer': MMDLayer, 'ModelTfPrintLayer': ModelTfPrintLayer}):
         best_model = tf.keras.models.load_model(filepath='model/'+CFG.model_name+'.h5')
     
     if CFG.insample:
@@ -126,13 +139,19 @@ def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/TC/data/data.csv'):
             auuc_12_insample.append(metrics[5][2])
         end = time.time()
         print('elaps: %.4f'%(end-start))
+        print('acc: ', np.mean(acc), np.std(acc))
+        print('AUUC_01: ', np.mean(auuc_01), np.std(auuc_01))
+        print('AUUC_02: ', np.mean(auuc_02), np.std(auuc_02))
+        print('AUUC_12: ', np.mean(auuc_12), np.std(auuc_12))
+
     print('acc: ', np.mean(acc), np.std(acc))
-    print('acc_insample: ', np.mean(acc_insample), np.std(acc_insample))
     print('bce: ', np.mean(bce), np.std(bce))
-    print('bce_insample: ', np.mean(bce_insample), np.std(bce_insample))
     print('AUUC_01: ', np.mean(auuc_01), np.std(auuc_01))
     print('AUUC_02: ', np.mean(auuc_02), np.std(auuc_02))
     print('AUUC_12: ', np.mean(auuc_12), np.std(auuc_12))
+
+    print('acc_insample: ', np.mean(acc_insample), np.std(acc_insample))
+    print('bce_insample: ', np.mean(bce_insample), np.std(bce_insample))
     print('AUUC_01_insample: ', np.mean(auuc_01_insample), np.std(auuc_01_insample))
     print('AUUC_02_insample: ', np.mean(auuc_02_insample), np.std(auuc_02_insample))
     print('AUUC_12_insample: ', np.mean(auuc_12_insample), np.std(auuc_12_insample))
@@ -140,33 +159,46 @@ def run(CFG, data_base_dir = 'C:/Users/ouyangyan/Desktop/TC/data/data.csv'):
 
 class CFG:
     lr=1e-3
-    epoch=200
+    epoch=300
     batch_size=1024
-    verbose=1
+    verbose=0
+    loss_verbose=0
 
-    times=1
+    times=10
     insample=True
 
-    model_type='DRCFR'        # Tarnet / DRCFR
-    model_name= model_type + ''
+    model_type='IDRL'        # Tarnet / DRCFR / IIB / IDRL
+    model_name= model_type + '_1'
 
-    use_MIM=True
-    ratio_MIM=1e-9
+    use_DR=True        # DRCFR / IIB / IDRL
+    ratio_DR=1e-5
 
-    use_IPW=False
+    use_IPW=False       # Tarnet / DRCFR
     ratio_ce=1e-1
 
-    use_MMD=True
+    use_MMD=False       # Tarnet / DRCFR
     ratio_MMD=1e-3
 
-    use_Wdist=False
+    use_Wdist=False     # Tarnet / DRCFR
     ratio_Wdist=1e-2
 
-    use_BCAUSS=False
-    ratio_BCAUSS=1e-1
+    use_HSIC=False      # Tarnet / DRCFR
+    ratio_HSIC=1e-2
+
+    use_infomax=False        # DRCFR
+    ratio_infomax=1e-9
+
+    # use_BCAUSS=False
+    # ratio_BCAUSS=1e-1
+
+    use_MI=True        # IIB / IDRL
+    ratio_MI=1e-4
+
+    use_PS=False        # IDRL
+    ratio_PS=1e-1
 
     # kernels_func=guassian_kernel              # linear_kernel(1e-3) / polynomial_kernel(1e-5) / sigmoid_kernel(1e-1) / guassian_kernel(1e-1)
-    
+
 
 if __name__ == '__main__':
     run(CFG)

@@ -1,11 +1,9 @@
 # %%
 import tensorflow as tf
-import keras.backend as K
 from tensorflow.keras.layers import Layer
 from keras.layers import Input, Dense, Concatenate, BatchNormalization, Dropout
 from keras.models import Model
-from keras import regularizers
-import tensorflow_probability as tfp
+from scipy.spatial import distance
 
 from custom_layers import *
 
@@ -88,27 +86,54 @@ def HSIC(x, y):
     return scale * hsic
 
 
-class ModelTfPrintLayer(Layer):
-    def __init__(self, loss_name):
-        super(ModelTfPrintLayer, self).__init__()
-        self.loss_name = loss_name
+def KL(t1, t2):
+    t1 = tf.nn.softmax(t1)
+    t2 = tf.nn.softmax(t2)
+    KL = tf.reduce_sum(t1*tf.math.log(t1/t2 + 0.001))
+    return KL
 
-    def call(self, loss, **kwargs):
-        tf.print(self.loss_name+': ', loss)
-        return loss
+
+def JS(t1, t2):
+    t1 = tf.nn.softmax(t1)
+    t2 = tf.nn.softmax(t2)
+    m = 0.5 * (t1 + t2)
+
+    js_divergence = 0.5 * (tf.reduce_sum(t1*tf.math.log(t1/m + 0.001)) + tf.reduce_sum(t1*tf.math.log(t1/m + 0.001)))
+    
+    return tf.reduce_mean(js_divergence)
+
+
+def MI(x, y):
+    px = tf.reduce_mean(x)
+    py = tf.reduce_mean(y)
+    pxy = tf.reduce_mean(tf.multiply(x, y))
+    mi = tf.reduce_sum(pxy * tf.math.log(pxy / (px * py + 1e-8)))
+    return mi
+
+
+class ModelTfPrintLayer(tf.keras.layers.Layer):
+    def __init__(self, **kwargs):
+        super(ModelTfPrintLayer, self).__init__(**kwargs)
+
+    def call(self, input, name):
+        print_op1 = tf.print("[ModelTfPrintLayer]", input, name)
+        with tf.control_dependencies([print_op1]):
+            return tf.identity(input)
 
 
 def make_Tarnet(input_dim,
                 num_domains=3,
                 reg_l2=0.001,
                 act_fn='relu',
-                use_IPW=True,
-                use_MMD=True,
-                use_Wdist=True,
-                use_BCAUSS=True,
+                use_IPW=False,
+                use_MMD=False,
+                use_Wdist=False,
+                use_HSIC=False,
+                use_BCAUSS=False,
                 ratio_ce=0.1,
                 ratio_mmd=0.1,
                 ratio_Wdist=0.1,
+                ratio_HSIC=0.1,
                 ratio_bcauss=0.1,
                 ):
     inputs = Input(shape=(input_dim+2,), name='input')
@@ -160,14 +185,17 @@ def make_Tarnet(input_dim,
                 loss_MMD += MMDLayer()(feats_list[i], feats_list[j])
         #loss_MMD = ModelTfPrintLayer('loss_MMD')(loss_MMD)
         loss += ratio_mmd * loss_MMD
-    if use_Wdist:
+    elif use_Wdist:
         loss_Wdist = 0
         for i in range(num_domains-1):
             for j in range(i+1, num_domains):
                 loss_Wdist += wasserstein_distance(feats_list[i], feats_list[j])
         #loss_MMD = ModelTfPrintLayer('loss_MMD')(loss_MMD)
         loss += ratio_Wdist * loss_Wdist
-    if use_BCAUSS:
+    elif use_HSIC:
+        loss_HSIC = HSIC(x, t_onehot)
+        loss += ratio_HSIC * loss_HSIC
+    elif use_BCAUSS:
         loss_bcauss = loss_Bcauss(feats_list, ps_list)
         #loss_bcauss = ModelTfPrintLayer('loss_bcauss')(loss_bcauss)
         loss += ratio_bcauss * loss_bcauss
@@ -183,16 +211,21 @@ def make_DRCFR(input_dim,
                 num_domains=3,
                 reg_l2=0.001,
                 act_fn='relu',
-                use_IPW=True,
-                use_MIM=True,
-                use_MMD=True,
-                use_Wdist=True,
-                use_BCAUSS=True,
+                use_IPW=False,
+                use_DR=False,
+                use_MMD=False,
+                use_Wdist=False,
+                use_HSIC=False,
+                use_BCAUSS=False,
+                use_infomax=False,
                 ratio_ce=0.1,
-                ratio_MIM=1e-5,
+                ratio_DR=1e-5,
                 ratio_mmd=0.1,
                 ratio_Wdist=0.1,
+                ratio_HSIC=0.1,
                 ratio_bcauss=0.1,
+                ratio_infomax=0.1,
+                loss_verbose=0,
                 ):
     inputs = Input(shape=(input_dim+2,), name='input')
     input_x, input_t, input_y = inputs[:, :input_dim], inputs[:, input_dim:input_dim+1], inputs[:, input_dim+1:]
@@ -218,51 +251,209 @@ def make_DRCFR(input_dim,
         y_pred = Dense(units=1, activation='sigmoid', kernel_initializer='RandomNormal', kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(y_pred)
         y_preds.append(y_pred)
     y_preds = Concatenate(1)(y_preds)
-    t_onehot = tf.squeeze(tf.one_hot(t, depth=num_domains), axis=1)
     y_pred = tf.reduce_sum(tf.multiply(y_preds, t_onehot), axis=1, keepdims=True)
 
     ## loss
     if use_IPW:  
         weight = tf.stop_gradient(tf.reduce_sum(tf.multiply(t_onehot, 1/(t_pred+0.001)), axis=1, keepdims=True))
         loss = tf.reduce_mean(tf.multiply(tf.keras.losses.binary_crossentropy(input_y, y_pred), weight))
+        if loss_verbose == 1:
+            loss = ModelTfPrintLayer()(loss, 'loss')
         loss_ce = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(t_onehot, t_pred))
+        if loss_verbose == 1:
+            loss_ce = ModelTfPrintLayer()(loss_ce, 'loss_ce')
         loss += ratio_ce * loss_ce
     else:
         loss = tf.reduce_mean(tf.keras.losses.binary_crossentropy(input_y, y_pred))
+        if loss_verbose == 1:
+            loss = ModelTfPrintLayer()(loss, 'loss')
     
-    if use_MIM:
-        loss += ratio_MIM * (HSIC(A,I) + HSIC(A,C)+ HSIC(I,C))
+    # DR
+    if use_DR:
+        loss_DR = (HSIC(A,I) + HSIC(A,C)+ HSIC(I,C))
+        if loss_verbose == 1:
+            loss_DR = ModelTfPrintLayer()(loss_DR, 'loss_DR')
+        loss += ratio_DR * loss_DR
 
+    # IPM
     x_list, feats_list, ps_list = [], [], []
     for i in range(num_domains):
         index = tf.where(tf.equal(t, i))[:, 0]
         x_list.append(tf.gather(input_x, index))
         feats_list.append(tf.gather(A, index))
         ps_list.append(tf.gather(c_pred[:, i:i+1], index))
+
     if use_MMD:
         loss_MMD = 0
         for i in range(num_domains-1):
             for j in range(i+1, num_domains):
                 loss_MMD += MMDLayer()(feats_list[i], feats_list[j])
-        #loss_MMD = ModelTfPrintLayer('loss_MMD')(loss_MMD)
+        if loss_verbose == 1:
+            loss_MMD = ModelTfPrintLayer()(loss_MMD, 'loss_MMD')
         loss += ratio_mmd * loss_MMD
-    if use_Wdist:
+    elif use_Wdist:
         loss_Wdist = 0
         for i in range(num_domains-1):
             for j in range(i+1, num_domains):
                 loss_Wdist += wasserstein_distance(feats_list[i], feats_list[j])
-        #loss_MMD = ModelTfPrintLayer('loss_MMD')(loss_MMD)
+        if loss_verbose == 1:
+            loss_Wdist = ModelTfPrintLayer()(loss_Wdist, 'loss_Wdist')
         loss += ratio_Wdist * loss_Wdist
-    if use_BCAUSS:
-        loss_bcauss = loss_Bcauss(feats_list, ps_list)
-        #loss_bcauss = ModelTfPrintLayer('loss_bcauss')(loss_bcauss)
-        loss += ratio_bcauss * loss_bcauss
+    elif use_HSIC:
+        loss_HSIC = HSIC(A, t_onehot)
+        if loss_verbose == 1:
+            loss_HSIC = ModelTfPrintLayer()(loss_HSIC, 'loss_HSIC')
+        loss += ratio_HSIC * loss_HSIC
+    
+    if use_infomax:
+        loss_info = HSIC(input_x, Concatenate(1)([C,A]))
+        if loss_verbose == 1:
+            loss_info = ModelTfPrintLayer()(loss_info, 'loss_info')
+        loss += ratio_infomax * loss_info
+
+    # if use_BCAUSS:
+    #     loss_bcauss = loss_Bcauss(feats_list, ps_list)
+    #     #loss_bcauss = ModelTfPrintLayer('loss_bcauss')(loss_bcauss)
+    #     loss += ratio_bcauss * loss_bcauss
 
     ## model
     model = Model(inputs=inputs, outputs=Concatenate(1)([y_pred, y_preds]))
     model.add_loss(loss)
 
     return model
+
+
+def make_IDRL(input_dim,
+            num_domains=3,
+            reg_l2=0.001,
+            act_fn='relu',
+            use_PS=False,
+            use_DR=False,
+            use_MI=False,
+            ratio_PS=0.1,
+            ratio_DR=0.1,
+            ratio_MI=0.1,
+            loss_verbose=0,
+            ):
+    inputs = Input(shape=(input_dim+2,), name='input')
+    input_x, input_t, input_y = inputs[:, :input_dim], inputs[:, input_dim:input_dim+1], inputs[:, input_dim+1:]
+    t = tf.cast(input_t, tf.int32)
+    t_onehot = tf.squeeze(tf.one_hot(t, depth=num_domains), axis=1)
+
+    # feats layers
+    R = Dense(units=64, activation=act_fn, kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(input_x)
+    H = Dense(units=64, activation=act_fn, kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(input_x)
+    
+    # PS layers
+    t_pred = Dense(units=num_domains, activation='sigmoid', kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(H)
+
+    # predict
+    y_preds = []
+    for _ in range(num_domains):
+        y_pred = Dense(units=16, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(R)
+        y_pred = Dense(units=4, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(y_pred)
+        y_pred = Dense(units=1, activation='sigmoid', kernel_initializer='RandomNormal', kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(y_pred)
+        y_preds.append(y_pred)
+    y_preds = Concatenate(1)(y_preds)
+    y_pred = tf.reduce_sum(tf.multiply(y_preds, t_onehot), axis=1, keepdims=True)
+
+    # loss
+    loss = tf.reduce_mean(tf.keras.losses.binary_crossentropy(input_y, y_pred))
+    if loss_verbose == 1:
+        loss = ModelTfPrintLayer()(loss, 'loss')
+    
+    if use_PS:
+        loss_PS = tf.reduce_mean(tf.keras.losses.categorical_crossentropy(t_onehot, t_pred))
+        if loss_verbose == 1:
+            loss_PS = ModelTfPrintLayer()(loss_PS, 'loss_PS')
+        loss += ratio_PS * loss_PS
+    
+    if use_DR:
+        loss_DR = HSIC(R, t_onehot)
+        if loss_verbose == 1:
+            loss_DR = ModelTfPrintLayer()(loss_DR, 'loss_DR')
+        loss += ratio_DR * loss_DR
+    
+    if use_MI:
+        n = tf.cast(tf.reduce_sum(t_onehot, axis=0), tf.float32) + tf.constant([1e-9]*num_domains)
+        S = tf.reduce_sum(tf.multiply(R, tf.cast(t_onehot[:,0:1], tf.float32)), axis=0) / n[0]
+        for i in range(1, num_domains):
+            S += tf.reduce_sum(tf.multiply(R, tf.cast(t_onehot[:,i:i+1], tf.float32)), axis=0) / n[i]
+        S /= tf.reduce_sum(n/(n+1e-9))
+        S = tf.sigmoid(S)
+        S = tf.tile(tf.expand_dims(S, axis=0), [tf.shape(R)[0], 1])
+        
+        # R = ModelTfPrintLayer()(R, 'R')
+        # S = ModelTfPrintLayer()(S, 'S')
+        # loss_MI = 100 / MI(R,S)
+        loss_MI = JS(R,S)
+        if loss_verbose == 1:
+            loss_MI = ModelTfPrintLayer()(loss_MI, 'loss_MI')
+        loss += ratio_MI * loss_MI
+    
+    # model
+    model = Model(inputs=inputs, outputs=Concatenate(1)([y_pred, y_preds]))
+    model.add_loss(loss)
+
+    return model
+
+
+def make_IIB(input_dim,
+            num_domains=3,
+            reg_l2=0.001,
+            act_fn='relu',
+            use_MI=False,
+            use_DR=False,
+            ratio_MI=0.1,
+            ratio_DR=0.1,
+            loss_verbose=0,
+            ):
+    inputs = Input(shape=(input_dim+2,), name='input')
+    input_x, input_t, input_y = inputs[:, :input_dim], inputs[:, input_dim:input_dim+1], inputs[:, input_dim+1:]
+    t = tf.cast(input_t, tf.int32)
+    t_onehot = tf.squeeze(tf.one_hot(t, depth=num_domains), axis=1)
+
+    # feats layers
+    I = Dense(units=64, activation=act_fn, kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(input_x)
+    D = Dense(units=64, activation=act_fn, kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(input_x)
+    
+    # prediction layers
+    iv_pred = Dense(units=16, activation=act_fn, kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(I)
+    iv_pred = Dense(units=4, activation=act_fn, kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(iv_pred)
+    iv_pred = Dense(units=1, activation=act_fn, kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(iv_pred)
+
+    y_preds = []
+    for _ in range(num_domains):
+        domain_pred = Dense(units=16, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(D)
+        domain_pred = Dense(units=4, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(domain_pred)
+        domain_pred = Dense(units=1, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(domain_pred)
+        y_preds.append(Dense(units=1, activation='sigmoid', kernel_initializer='RandomNormal', kernel_regularizer=tf.keras.regularizers.l2(reg_l2))(Concatenate(1)([domain_pred, iv_pred])))
+    y_preds = Concatenate(1)(y_preds)
+    y_pred = tf.reduce_sum(tf.multiply(y_preds, t_onehot), axis=1, keepdims=True)
+    
+    # loss
+    loss = tf.reduce_mean(tf.keras.losses.binary_crossentropy(input_y, y_pred))
+    if loss_verbose == 1:
+        loss = ModelTfPrintLayer()(loss, 'loss')
+    
+    if use_DR:
+        loss_DR = HSIC(I, D)
+        if loss_verbose == 1:
+            loss_DR = ModelTfPrintLayer()(loss_DR, 'loss_DR')
+        loss += ratio_DR * loss_DR
+    
+    if use_MI:
+        loss_MI = HSIC(I, t_onehot)
+        if loss_verbose == 1:
+            loss_MI = ModelTfPrintLayer()(loss_MI, 'loss_MI')
+        loss += ratio_MI * loss_MI
+    
+    # model
+    model = Model(inputs=inputs, outputs=Concatenate(1)([y_pred, y_preds]))
+    model.add_loss(loss)
+
+    return model
+
 
 
 if __name__ == '__main__':
@@ -275,16 +466,53 @@ if __name__ == '__main__':
     # print(MMDLayer()(a, b), wasserstein_distance(a, b))
     # a, b = tf.random.normal((200, d), mean=100.0, stddev=2.0), tf.random.normal((400, d), mean=1.0, stddev=2.0)
     # print(MMDLayer()(a, b), wasserstein_distance(a, b))
-    a, b = tf.random.normal((n, d), mean=1.0, stddev=2.0), tf.random.normal((n, d), mean=1.0, stddev=2.0)
-    print(HSIC(a, b))
+
+    # a = tf.random.normal((n, d), mean=1.0, stddev=2.0)
+    # b = tf.random.normal((n, d), mean=1.0, stddev=2.0)
+    # print(HSIC(a, b), JS(a, b), KL(a, b))
+    # a = tf.random.normal((n, d), mean=1.0, stddev=2.0)
+    # b = tf.random.normal((n, d), mean=1.0, stddev=2.0) + a
+    # print(HSIC(a, b), JS(a, b), KL(a, b))
+    # a = tf.random.normal((n, d), mean=1.0, stddev=2.0)
+    # b = tf.random.normal((n, d), mean=0.1, stddev=2.0) + a
+    # print(HSIC(a, b), JS(a, b), KL(a, b))
+
+    # a = tf.random.normal((d,), mean=1.0, stddev=2.0)
+    # b = tf.random.normal((d,), mean=1.0, stddev=2.0)
+    # print(MI(a, b), KL(a, b), JS(a, b))
+
+    # a = tf.random.normal((d,), mean=1.0, stddev=2.0)
+    # b = a + tf.random.normal((d,), mean=1.0, stddev=2.0)
+    # print(MI(a, b), KL(a, b), JS(a, b))
+
     a = tf.random.normal((n, d), mean=1.0, stddev=2.0)
-    b = a + tf.random.normal((n, d), mean=1.0, stddev=2.0)
-    print(HSIC(a, b))
+    b = tf.random.normal((d,), mean=1.0, stddev=2.0)
+    b_tiled = tf.tile(tf.expand_dims(b, axis=0), [tf.shape(a)[0], 1])
+    print(JS(a, b_tiled))
+
+    a = tf.random.normal((n, d), mean=100.0, stddev=2.0)
+    b = tf.random.normal((d,), mean=1.0, stddev=2.0)
+    b_tiled = tf.tile(tf.expand_dims(b, axis=0), [tf.shape(a)[0], 1])
+    print(JS(a, b_tiled))
+
     a = tf.random.normal((n, d), mean=1.0, stddev=2.0)
-    b = a + tf.random.normal((n, d), mean=0.1, stddev=2.0)
-    print(HSIC(a, b))
+    b = tf.random.normal((d,), mean=1.0, stddev=2.0)
+    b_tiled = tf.tile(tf.expand_dims(b, axis=0), [tf.shape(a)[0], 1])
+    a += b_tiled
+    print(JS(a, b_tiled))
+
+    a = tf.random.normal((n, d), mean=0.1, stddev=2.0)
+    b = tf.random.normal((d,), mean=1.0, stddev=2.0)
+    b_tiled = tf.tile(tf.expand_dims(b, axis=0), [tf.shape(a)[0], 1])
+    a += b_tiled
+    print(JS(a, b_tiled))
+
+    a = tf.constant([[305.,0,0,0], [350.,0,0,0], [340.,0.,0.,0.], [315.,0.,0.,0.]])
+    b = tf.constant([[1,0.5,0.999,0.5], [1,0.5,0.999,0.5], [1,0.5,0.999,0.5], [1,0.5,0.999,0.5]])
+    print(JS(a, b))
 
     # model = make_Tarnet(40)
+
 
 # %%
 # t = tf.constant([[0.], [1.], [2.], [0.], [1.], [2.]])
