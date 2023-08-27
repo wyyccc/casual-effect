@@ -38,20 +38,31 @@ def train_and_predict(x_train, t_train, yf_train, ycf_train, mu_0_train, mu_1_tr
     # print(np.concatenate([t_train.reshape(-1, 1), yf_train.reshape(-1, 1), ycf_train.reshape(-1, 1)], 1)[:20])
     # assert 1==2
 
+    xty_train = np.concatenate([x_train, t_train.reshape(-1, 1), yf_train.reshape(-1, 1)], 1)
+    xty_test = np.concatenate([x_test, t_test.reshape(-1, 1), yf_test.reshape(-1, 1)], 1)
     callbacks = [tf.keras.callbacks.ModelCheckpoint(filepath='model/'+CFG.model_type+CFG.model_name+'.h5', monitor='val_loss', save_best_only=True, save_weights_only=False, mode='min', verbose=CFG.verbose)]
     
+    if CFG.use_IPW == 'PS':
+        PS_model = make_PS(x_train.shape[1])
+        PS_model.compile(optimizer=tf.keras.optimizers.Nadam(tf.keras.optimizers.schedules.ExponentialDecay(initial_learning_rate=CFG.lr_PS, decay_steps=1, decay_rate=0.999)))
+        callbacks_PS = [tf.keras.callbacks.ModelCheckpoint(filepath='model/'+CFG.model_name+'_PS'+'.h5', monitor='val_loss', save_best_only=True, save_weights_only=False, mode='min', verbose=CFG.verbose)]
+        PS_model.fit(xty_train, yf_train, callbacks=callbacks_PS, validation_split=0.3, epochs=CFG.PS_epoch, batch_size=CFG.batch_size, verbose=CFG.verbose)
+        with tf.keras.utils.custom_object_scope({'MMDLayer': MMDLayer, 'ModelTfPrintLayer': ModelTfPrintLayer}):
+            best_model = tf.keras.models.load_model(filepath='model/'+CFG.model_name+'_PS'+'.h5')
+        PS = best_model.predict(xty_train, verbose=CFG.verbose)
+        xty_train = np.concatenate([xty_train, PS], 1)
+        xty_test = np.concatenate([xty_test, np.ones((x_test.shape[0],1))], 1)
     if CFG.model_type == 'BNN':
         model = make_BNN(x_train.shape[1])
     elif CFG.model_type == 'Tarnet':
-        model = make_Tarnet(x_train.shape[1], use_IPM=CFG.use_IPM, ratio_IPM=CFG.ratio_IPM, loss_verbose=CFG.loss_verbose)
+        model = make_Tarnet(x_train.shape[1], use_IPW=CFG.use_IPW, use_IPM=CFG.use_IPM, ratio_IPM=CFG.ratio_IPM, loss_verbose=CFG.loss_verbose)
     elif CFG.model_type == 'DeRCFR':
-        model = make_DR(x_train.shape[1])
+        model = make_DR(x_train.shape[1], use_IPW=CFG.use_IPW, use_IPM=CFG.use_IPM, use_DR=CFG.use_DR, use_PS=CFG.use_PS 
+                        , ratio_IPM=CFG.ratio_IPM, ratio_DR=CFG.ratio_DR, ratio_PS=CFG.ratio_PS, loss_verbose=CFG.loss_verbose)
     
     model.compile(optimizer=tf.keras.optimizers.Nadam(tf.keras.optimizers.schedules.ExponentialDecay(initial_learning_rate=CFG.lr, decay_steps=1, decay_rate=0.999)))
     # model.summary()
-
-    xty_train = np.concatenate([x_train, t_train.reshape(-1, 1), yf_train.reshape(-1, 1)], 1)
-    xty_test = np.concatenate([x_test, t_test.reshape(-1, 1), yf_test.reshape(-1, 1)], 1)
+    
     model.fit(xty_train, yf_train, callbacks=callbacks, validation_split=0.2, epochs=CFG.epoch, batch_size=CFG.batch_size, verbose=CFG.verbose)
 
     with tf.keras.utils.custom_object_scope({'ModelTfPrintLayer': ModelTfPrintLayer, 'MMDLayer': MMDLayer,}):
@@ -88,15 +99,19 @@ def train_and_predict(x_train, t_train, yf_train, ycf_train, mu_0_train, mu_1_tr
 
 
 def run(CFG):
+    np.random.seed(123)
     data = np.genfromtxt(CFG.data_dir, delimiter=',')
     data = data[~np.isnan(data).any(axis=1)].astype(float)
+
+    del_index = [i for i in range(747) if data[i, 0] == 1][:CFG.k]
+    data = np.array([i for num,i in enumerate(data) if num not in del_index])
     
     T, YF, YCF, mu_0, mu_1, X = data[:, 0:1].astype(int), data[:, 1:2], data[:, 2:3], data[:, 3:4], data[:, 4:5], data[:, 5:]
 
     pehe, ate = [], []
     pehe_insample, ate_insample = [], []
     for i in range(CFG.cv):
-        if i > 747:
+        if i >= 747-CFG.k:
             break
         print(i)
         X_train, T_train, YF_train, YCF_train, mu_0_train, mu_1_train = np.delete(X,i,axis=0), np.delete(T,i,axis=0), np.delete(YF,i,axis=0), np.delete(YCF,i,axis=0), np.delete(mu_0,i,axis=0), np.delete(mu_1,i,axis=0)
@@ -118,8 +133,14 @@ def run(CFG):
             ate.append(metrics[1])
         end = time.time()
         print('elaps: %.4f'%(end-start))
-    print('pehe: ', np.mean(pehe), np.std(pehe))
-    print('ate: ', np.mean(ate), np.std(ate))
+        print('pehe: ', np.mean(pehe), np.std(pehe))
+        print('ate: ', np.mean(ate), np.std(ate))
+
+    with open(CFG.log_dir, 'w') as f:
+        f.write(str(np.mean(pehe))+'\n')
+        f.write(str(np.std(pehe))+'\n')
+        f.write(str(np.mean(ate))+'\n')
+        f.write(str(np.std(ate))+'\n')
 
     print('pehe (insample): ', np.mean(pehe_insample), np.std(pehe_insample))
     print('ate (insample): ', np.mean(ate_insample), np.std(ate_insample))
@@ -127,21 +148,33 @@ def run(CFG):
 
 class CFG:
     data_dir = 'C:/Users/ouyangyan/Desktop/CE1/data/data.csv'
+    
     np.random.seed(123)
     cv=747
     insample=False
+    k=20    # 0-139
 
     lr=1e-2
-    epoch=200
+    lr_PS=5e-3
+    epoch=300
+    PS_epoch=100
     batch_size=1024
     verbose=0
     loss_verbose=False    
 
-    model_type='Tarnet'         # 'BNN' / 'Tarnet' / 'DR'
-    model_name='_2'
-    use_IPW=None
-    use_IPM=None            # None / 'MMD' / 'Wdist' / 'HSIC'
+    model_type='Tarnet'         # 'BNN' / 'Tarnet' / 'DeRCFR'
+    model_name='__1'
+
+    use_IPW='weighted'            # None / 'weighted' / 'PS'
+    use_IPM='HSIC'           # None / 'MMD' / 'Wdist' / 'HSIC'
+    use_DR=False
+    use_PS=False
+
     ratio_IPM=1
+    ratio_DR=100
+    ratio_PS=0.1
+
+    log_dir = model_type + model_name + '_' + str(use_IPW) + '_' + str(use_IPM) + '_' + str(use_DR) + '_' + str(use_PS) + '.txt'
 
 
 if __name__ == '__main__':

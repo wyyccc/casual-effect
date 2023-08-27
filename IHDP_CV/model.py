@@ -103,8 +103,7 @@ def make_PS(input_dim,
     inputs = Input(shape=(input_dim+2,), name='input')
     input_x, input_t, input_y = inputs[:, :input_dim], inputs[:, input_dim:input_dim+1], inputs[:, input_dim+1:]
 
-    x = Dense(units=4, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(input_x)
-    t_pred = Dense(units=1, activation='sigmoid', kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(x)
+    t_pred = Dense(units=1, activation='sigmoid', kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(input_x)
 
     model = Model(inputs=inputs, outputs=t_pred)
     loss = tf.reduce_mean(tf.keras.losses.binary_crossentropy(input_t, t_pred))
@@ -139,12 +138,17 @@ def make_Tarnet(input_dim,
                 hidden_dim=128,
                 reg_l2=0.001,
                 act_fn='elu',
+                use_IPW=None,
                 use_IPM=None,
                 ratio_IPM=1,
                 loss_verbose=False,
                 ):
 
-    inputs = Input(shape=(input_dim+2,), name='input')
+    if use_IPW == 'PS':
+        inputs = Input(shape=(input_dim+3,), name='input')
+        PS = inputs[:, input_dim+2:input_dim+3]
+    else:
+        inputs = Input(shape=(input_dim+2,), name='input')
     input_x, input_t, input_y = inputs[:, :input_dim], inputs[:, input_dim:input_dim+1], inputs[:, input_dim+1:]
     t = tf.cast(input_t, tf.int32)
     t_onehot = tf.squeeze(tf.one_hot(t, depth=num_domains), axis=1)
@@ -157,22 +161,28 @@ def make_Tarnet(input_dim,
     ## predict layers
     y0_hidden = Dense(units=hidden_dim, activation=act_fn, kernel_regularizer=regularizers.l2(reg_l2))(x)
     y0_hidden = Dense(units=hidden_dim, activation=act_fn, kernel_regularizer=regularizers.l2(reg_l2))(y0_hidden)
-    y0_predictions = Dense(units=1, activation=None, kernel_regularizer=regularizers.l2(reg_l2), name='y0_predictions')(input_x)
+    y0_predictions = Dense(units=1, activation=None, kernel_regularizer=regularizers.l2(reg_l2), name='y0_predictions')(y0_hidden)
     y1_hidden = Dense(units=hidden_dim, activation=act_fn, kernel_regularizer=regularizers.l2(reg_l2))(x)
     y1_hidden = Dense(units=hidden_dim, activation=act_fn, kernel_regularizer=regularizers.l2(reg_l2))(y1_hidden)
-    y1_predictions = Dense(units=1, activation=None, kernel_regularizer=regularizers.l2(reg_l2), name='y1_predictions')(input_x)
+    y1_predictions = Dense(units=1, activation=None, kernel_regularizer=regularizers.l2(reg_l2), name='y1_predictions')(y1_hidden)
     y_preds = Concatenate(1)([y0_predictions, y1_predictions])
-    t_onehot = tf.squeeze(tf.one_hot(t, depth=num_domains), axis=1)
     y_pred = tf.reduce_sum(tf.multiply(y_preds, t_onehot), axis=1, keepdims=True)
 
     ## output
     model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions]))
 
     ## loss
-    u = tf.cast(tf.reduce_sum(t) / tf.shape(t)[0], tf.float32)
-    t = tf.cast(t, tf.float32)
-    w = t/(2*u+0.01) + (1-t)/(2*(1-u)+0.01)
-    loss = tf.reduce_mean(tf.multiply(w, tf.square(y_pred - input_y)))
+    if use_IPW == 'PS':
+        t = tf.cast(input_t, tf.float32)
+        w = t/(2*PS+0.01) + (1-t)/(2*(1-PS)+0.01)
+        loss = tf.reduce_mean(tf.multiply(w, tf.square(y_pred - input_y)))
+    elif use_IPW == 'weighted':
+        u = tf.cast(tf.reduce_sum(t) / tf.shape(t)[0], tf.float32)
+        t = tf.cast(t, tf.float32)
+        w = t/(2*u+0.01) + (1-t)/(2*(1-u)+0.01)
+        loss = tf.reduce_mean(tf.multiply(w, tf.square(y_pred - input_y)))
+    else:
+        loss = tf.reduce_mean(tf.square(y_pred - input_y))
     if loss_verbose:
         loss = ModelTfPrintLayer()(loss, 'loss')
 
@@ -198,12 +208,21 @@ def make_DR(input_dim,
             hidden_dim=128,
             reg_l2=0.001,
             act_fn='elu',
+            use_IPW=None,
             use_IPM=None,
+            use_DR=False,
+            use_PS=False,
             ratio_IPM=1,
+            ratio_DR=1,
+            ratio_PS=1,
             loss_verbose=False,
             ):
     
-    inputs = Input(shape=(input_dim+2,), name='input')
+    if use_IPW == 'PS':
+        inputs = Input(shape=(input_dim+3,), name='input')
+        PS = inputs[:, input_dim+2:input_dim+3]
+    else:
+        inputs = Input(shape=(input_dim+2,), name='input')
     input_x, input_t, input_y = inputs[:, :input_dim], inputs[:, input_dim:input_dim+1], inputs[:, input_dim+1:]
     t = tf.cast(input_t, tf.int32)
     t_onehot = tf.squeeze(tf.one_hot(t, depth=num_domains), axis=1)
@@ -211,50 +230,74 @@ def make_DR(input_dim,
     ## representation layers
     x = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(input_x)
     x = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(x)
-    P = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(x)
+    A = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(x)
     x = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(input_x)
     x = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(x)
     C = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(x)
     x = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(input_x)
     x = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(x)
     I = Dense(units=hidden_dim, activation=act_fn, kernel_initializer='RandomNormal', kernel_regularizer=regularizers.l2(reg_l2))(x)
+
+    ## PS
+    t_pred = Dense(units=1, activation='sigmoid', kernel_initializer='RandomNormal')(Concatenate(1)([C, I]))
     
     ## predict layers
-    x = Concatenate(1)([P, C])
+    x = Concatenate(1)([A, C])
     y0_hidden = Dense(units=hidden_dim, activation=act_fn, kernel_regularizer=regularizers.l2(reg_l2))(x)
-    y1_hidden = Dense(units=hidden_dim, activation=act_fn, kernel_regularizer=regularizers.l2(reg_l2))(x)
     y0_hidden = Dense(units=hidden_dim, activation=act_fn, kernel_regularizer=regularizers.l2(reg_l2))(y0_hidden)
-    y1_hidden = Dense(units=hidden_dim, activation=act_fn, kernel_regularizer=regularizers.l2(reg_l2))(y1_hidden)
     y0_predictions = Dense(units=1, activation=None, kernel_regularizer=regularizers.l2(reg_l2), name='y0_predictions')(y0_hidden)
+    y1_hidden = Dense(units=hidden_dim, activation=act_fn, kernel_regularizer=regularizers.l2(reg_l2))(x)
+    y1_hidden = Dense(units=hidden_dim, activation=act_fn, kernel_regularizer=regularizers.l2(reg_l2))(y1_hidden)
     y1_predictions = Dense(units=1, activation=None, kernel_regularizer=regularizers.l2(reg_l2), name='y1_predictions')(y1_hidden)
     y_preds = Concatenate(1)([y0_predictions, y1_predictions])
     t_onehot = tf.squeeze(tf.one_hot(t, depth=num_domains), axis=1)
     y_pred = tf.reduce_sum(tf.multiply(y_preds, t_onehot), axis=1, keepdims=True)
     
     ## output
-    model = Model(inputs=inputs, outputs=Concatenate(1)([y0_predictions, y1_predictions]))
+    model = Model(inputs=inputs, outputs=y_preds)
 
     ## loss
-    u = tf.cast(tf.reduce_sum(t) / tf.shape(t)[0], tf.float32)
-    t = tf.cast(t, tf.float32)
-    w = t/(2*u+0.01) + (1-t)/(2*(1-u)+0.01)
-    loss = tf.reduce_mean(tf.multiply(w, tf.square(y_pred - input_y)))
+    if use_IPW == 'PS':
+        t = tf.cast(input_t, tf.float32)
+        w = t/(2*PS+0.01) + (1-t)/(2*(1-PS)+0.01)
+        loss = tf.reduce_mean(tf.multiply(w, tf.square(y_pred - input_y)))
+    elif use_IPW == 'weighted':
+        u = tf.cast(tf.reduce_sum(t) / tf.shape(t)[0], tf.float32)
+        t = tf.cast(t, tf.float32)
+        w = t/(2*u+0.01) + (1-t)/(2*(1-u)+0.01)
+        loss = tf.reduce_mean(tf.multiply(w, tf.square(y_pred - input_y)))
+    else:
+        loss = tf.reduce_mean(tf.square(y_pred - input_y))
     if loss_verbose:
         loss = ModelTfPrintLayer()(loss, 'loss')
-    
-    #if use_orthogonality:
 
     if use_IPM is not None:
         index0, index1 = tf.where(tf.equal(t, 0))[:, 0], tf.where(tf.equal(t, 1))[:, 0]
-        feats0, feats1 = tf.gather(P, index0), tf.gather(P, index1)
+        feats0, feats1 = tf.gather(A, index0), tf.gather(A, index1)
         if use_IPM == 'MMD':
             loss_IPM = MMDLayer()(feats0, feats1)
         elif use_IPM == 'Wdist':
             loss_IPM = wasserstein_distance(feats0, feats1)
+        elif use_IPM == 'HSIC':
+            loss_IPM = HSIC(A, t_onehot)
         if loss_verbose:
             loss_IPM = ModelTfPrintLayer()(loss_IPM, 'loss_IPM')
         loss += ratio_IPM * loss_IPM
 
+    if use_DR:
+        loss_DR = HSIC(A, C) + HSIC(A, I) + HSIC(I, C)
+        if loss_verbose:
+            loss_DR = ModelTfPrintLayer()(loss_DR, 'loss_DR')
+        loss += ratio_DR * loss_DR
+
+    if use_PS:
+        t = tf.cast(t, tf.int32)
+        loss_PS = tf.reduce_mean(tf.keras.losses.binary_crossentropy(t, t_pred))
+        if loss_verbose:
+            loss_PS = ModelTfPrintLayer()(loss_PS, 'loss_PS')
+        loss += ratio_PS * loss_PS
+
+    model.add_loss(loss)
     return model
 
 
