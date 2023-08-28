@@ -11,17 +11,15 @@ warnings.filterwarnings("ignore")
 
 
 def get_metrics(t, y_f, y_cf, y0, y1, mu_0, mu_1):
-    sample_num = t.shape[0]
+    # sample_num = t.shape[0] 1
     y0_true = (1-t)*y_f + t*y_cf
     y1_true = t*y_f + (1-t)*y_cf
-    eff_true = y1_true - y0_true
     eff_pred = y1 - y0
-    eff_diff = eff_true - eff_pred
 
-    pehe = tf.sqrt(tf.reduce_sum(tf.square(eff_diff)).numpy() / sample_num).numpy()
-    ate = tf.abs(tf.reduce_sum(mu_1 - mu_0 - eff_pred)).numpy() / sample_num
+    err_mu = tf.reduce_sum(mu_1 - mu_0 - eff_pred).numpy()
+    err_y = tf.reduce_sum(y1_true - y0_true - eff_pred).numpy()
 
-    return pehe, ate
+    return err_y, err_mu
 
 
 def train_and_predict(x_train, t_train, yf_train, ycf_train, mu_0_train, mu_1_train,
@@ -90,12 +88,12 @@ def train_and_predict(x_train, t_train, yf_train, ycf_train, mu_0_train, mu_1_tr
         # pehe_insample, ate_insample = get_metrics(t_train, yf_train, ycf_train, y0_pred_train, y1_pred_train, mu_0_train, mu_1_train)
         pehe_insample, ate_insample = 1, 1
 
-    pehe, ate = get_metrics(t_test, yf_test, ycf_test, y0_pred, y1_pred, mu_0_test, mu_1_test)
+    err_y, err_mu = get_metrics(t_test, yf_test, ycf_test, y0_pred, y1_pred, mu_0_test, mu_1_test)
     # pehe, ate = get_metrics(t_test, mu_0_test, mu_1_test, y0_pred, y1_pred)
 
     if CFG.insample:
-        return [pehe, ate], [pehe_insample, ate_insample]
-    return [pehe, ate]
+        return [err_y, err_mu], [pehe_insample, ate_insample]
+    return [err_y, err_mu]
 
 
 def run(CFG):
@@ -108,7 +106,7 @@ def run(CFG):
     
     T, YF, YCF, mu_0, mu_1, X = data[:, 0:1].astype(int), data[:, 1:2], data[:, 2:3], data[:, 3:4], data[:, 4:5], data[:, 5:]
 
-    pehe, ate = [], []
+    err_y, err_mu = [], []
     pehe_insample, ate_insample = [], []
     for i in range(CFG.cv):
         if i >= 747-CFG.k:
@@ -121,26 +119,32 @@ def run(CFG):
             metrics, metrics_insample = (train_and_predict(X_train, T_train, YF_train, YCF_train, mu_0_train, mu_1_train,
                           X_test, T_test, YF_test, YCF_test, mu_0_test, mu_1_test,
                           CFG))
-            pehe.append(metrics[0])
-            ate.append(metrics[1])
+            err_y.append(metrics[0])
+            err_mu.append(metrics[1])
             pehe_insample.append(metrics_insample[0])
             ate_insample.append(metrics_insample[1])
         else:
             metrics = (train_and_predict(X_train, T_train, YF_train, YCF_train, mu_0_train, mu_1_train,
                           X_test, T_test, YF_test, YCF_test, mu_0_test, mu_1_test,
                           CFG))
-            pehe.append(metrics[0])
-            ate.append(metrics[1])
+            err_y.append(metrics[0])
+            err_mu.append(metrics[1])
         end = time.time()
         print('elaps: %.4f'%(end-start))
-        print('pehe: ', np.mean(pehe), np.std(pehe))
-        print('ate: ', np.mean(ate), np.std(ate))
+        print('pehe_y: ', np.sqrt(np.mean([i**2 for i in err_y])))
+        print('ate_y: ', np.mean(err_y), np.std(err_y))
+        print('ate_abs_y: ', np.mean([np.abs(i) for i in err_y]), np.std([np.abs(i) for i in err_y]))
+        print('pehe_mu: ', np.sqrt(np.mean([i**2 for i in err_mu])))
+        print('ate_mu: ', np.mean(err_mu), np.std(err_mu))
+        print('ate_abs_mu: ', np.mean([np.abs(i) for i in err_mu]), np.std([np.abs(i) for i in err_mu]))
 
     with open(CFG.log_dir, 'w') as f:
-        f.write(str(np.mean(pehe))+'\n')
-        f.write(str(np.std(pehe))+'\n')
-        f.write(str(np.mean(ate))+'\n')
-        f.write(str(np.std(ate))+'\n')
+        f.write(str(np.sqrt(np.mean([i**2 for i in err_y])))+'\n')
+        f.write(str(np.mean(err_y))+str(np.std(err_y))+'\n')
+        f.write(str(np.mean([np.abs(i) for i in err_y]))+str(np.std([np.abs(i) for i in err_y]))+'\n')
+        f.write(str(np.sqrt(np.mean([i**2 for i in err_mu])))+'\n')
+        f.write(str(np.mean(err_mu))+str(np.std(err_mu))+'\n')
+        f.write(str(np.mean([np.abs(i) for i in err_mu]))+str(np.std([np.abs(i) for i in err_mu]))+'\n')
 
     print('pehe (insample): ', np.mean(pehe_insample), np.std(pehe_insample))
     print('ate (insample): ', np.mean(ate_insample), np.std(ate_insample))
@@ -162,12 +166,12 @@ class CFG:
     verbose=0
     loss_verbose=False    
 
-    model_type='Tarnet'         # 'BNN' / 'Tarnet' / 'DeRCFR'
-    model_name='__1'
+    model_type='DeRCFR'         # 'BNN' / 'Tarnet' / 'DeRCFR'
+    model_name='1'
 
     use_IPW='weighted'            # None / 'weighted' / 'PS'
-    use_IPM='HSIC'           # None / 'MMD' / 'Wdist' / 'HSIC'
-    use_DR=False
+    use_IPM=None           # None / 'MMD' / 'Wdist' / 'HSIC'
+    use_DR=True
     use_PS=False
 
     ratio_IPM=1
