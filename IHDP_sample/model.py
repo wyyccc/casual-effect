@@ -37,7 +37,7 @@ def guassian_kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None
     return sum(kernel_val)
 
 
-def MMD(source, target, kernels_func=linear_kernel):    # linear_kernel / polynomial_kernel / sigmoid_kernel / guassian_kernel
+def MMD(source, target, kernels_func=guassian_kernel):    # linear_kernel / polynomial_kernel / sigmoid_kernel / guassian_kernel
     kernels = kernels_func(source, target)
     n_s = tf.shape(source)[0]
     n_t = tf.shape(target)[0]
@@ -285,7 +285,9 @@ def make_DR(input_dim,
         loss += ratio_IPM * loss_IPM
 
     if use_DR:
-        loss_DR = HSIC(A, C) + HSIC(A, I) + HSIC(I, C)
+        y = tf.cast(input_y, tf.int32)
+        y_onehot = tf.cast(tf.squeeze(tf.one_hot(y, depth=num_domains), axis=1), tf.float32)
+        loss_DR = HSIC(A, C) + HSIC(A, I) + HSIC(I, C) + HSIC(I, y_onehot)
         if loss_verbose:
             loss_DR = ModelTfPrintLayer()(loss_DR, 'loss_DR')
         loss += ratio_DR * loss_DR

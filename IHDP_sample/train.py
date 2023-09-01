@@ -187,13 +187,13 @@ class CFG:
     verbose=0
     loss_verbose=False    
 
-    model_type='Tarnet'         # 'BNN' / 'Tarnet' / 'DeRCFR'
-    model_name='_4'
+    model_type='DeRCFR'         # 'BNN' / 'Tarnet' / 'DeRCFR'
+    model_name='2'
 
-    use_IPW='PS'            # None / 'weighted' / 'PS'
-    use_IPM=None           # None / 'MMD' / 'Wdist' / 'HSIC'
-    use_DR=False
-    use_PS=False
+    use_IPW='weighted'            # None / 'weighted' / 'PS'
+    use_IPM='HSIC'           # None / 'MMD' / 'Wdist' / 'HSIC'
+    use_DR=True
+    use_PS=True
 
     ratio_IPM=1
     ratio_DR=100
